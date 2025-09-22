@@ -6,8 +6,12 @@ import hashlib
 import requests
 import webbrowser
 import urllib.parse
+import asyncio
+from datetime import datetime
 
 from tesla_stores import TeslaStore
+from telegram import Bot
+from telegram.error import TelegramError
 
 # Define constants
 CLIENT_ID = 'ownerapi'
@@ -19,6 +23,7 @@ CODE_CHALLENGE_METHOD = 'S256'
 STATE = os.urandom(16).hex()
 TOKEN_FILE = 'tesla_tokens.json'
 ORDERS_FILE = 'tesla_orders.json'
+TELEGRAM_CONFIG_FILE = 'telegram_config.json'
 APP_VERSION = '9.99.9-9999' # we can use a dummy version here, as the API does not check it strictly
 
 def color_text(text, color_code):
@@ -119,6 +124,99 @@ def load_orders_from_file():
     return None
 
 
+def load_telegram_config():
+    """Load Telegram configuration from file"""
+    if not os.path.exists(TELEGRAM_CONFIG_FILE):
+        return None
+    
+    try:
+        with open(TELEGRAM_CONFIG_FILE, 'r') as f:
+            config = json.load(f)
+            
+        if not config.get('bot_token') or not config.get('chat_id'):
+            return None
+            
+        return config
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+
+def setup_telegram_config():
+    """Interactive setup for Telegram configuration"""
+    print(color_text("\n> Setting up Telegram notifications...", '94'))
+    print(color_text("To enable Telegram notifications, you need:", '90'))
+    print(color_text("1. Create a Telegram bot by messaging @BotFather", '90'))
+    print(color_text("2. Get your chat ID by messaging @userinfobot", '90'))
+    print(color_text("3. Enter the details below", '90'))
+    
+    bot_token = input(color_text("Enter your Telegram bot token: ", '93')).strip()
+    chat_id = input(color_text("Enter your chat ID: ", '93')).strip()
+    
+    if not bot_token or not chat_id:
+        print(color_text("Invalid input. Skipping Telegram setup.", '91'))
+        return None
+    
+    config = {
+        'bot_token': bot_token,
+        'chat_id': chat_id
+    }
+    
+    try:
+        with open(TELEGRAM_CONFIG_FILE, 'w') as f:
+            json.dump(config, f, indent=2)
+        print(color_text(f"> Telegram configuration saved to '{TELEGRAM_CONFIG_FILE}'", '94'))
+        return config
+    except Exception as e:
+        print(color_text(f"Error saving Telegram config: {e}", '91'))
+        return None
+
+
+async def send_telegram_message(bot_token, chat_id, message):
+    """Send a message to Telegram"""
+    try:
+        bot = Bot(token=bot_token)
+        await bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML')
+        return True
+    except TelegramError as e:
+        print(color_text(f"Error sending Telegram message: {e}", '91'))
+        return False
+    except Exception as e:
+        print(color_text(f"Unexpected error sending Telegram message: {e}", '91'))
+        return False
+
+
+def format_telegram_message(differences, order_count):
+    """Format differences for Telegram message"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    message = f"🚗 <b>Tesla Order Status Update</b>\n"
+    message += f"📅 {timestamp}\n\n"
+    
+    if order_count == 1:
+        message += f"📋 Detected changes in your Tesla order:\n\n"
+    else:
+        message += f"📋 Detected changes in your Tesla orders:\n\n"
+    
+    # Process differences and make them more readable
+    for diff in differences[:20]:  # Limit to first 20 changes to avoid message length issues
+        # Remove ANSI color codes for Telegram
+        clean_diff = diff.replace('\033[91m', '').replace('\033[92m', '').replace('\033[0m', '')
+        
+        if clean_diff.startswith('- '):
+            message += f"❌ {clean_diff[2:]}\n"
+        elif clean_diff.startswith('+ '):
+            message += f"✅ {clean_diff[2:]}\n"
+        else:
+            message += f"ℹ️ {clean_diff}\n"
+    
+    if len(differences) > 20:
+        message += f"\n... and {len(differences) - 20} more changes"
+    
+    message += f"\n\n🔄 Check your Tesla account for complete details."
+    
+    return message
+
+
 def compare_dicts(old_dict, new_dict, path=''):
     differences = []
     for key in old_dict:
@@ -152,6 +250,16 @@ def compare_orders(old_orders, new_orders):
 # Main script logic
 print(color_text("\n> Start retrieving the information. Please be patient...\n", '94'))
 
+# Check if running in non-interactive mode (like cron)
+is_interactive = os.isatty(0)  # Check if stdin is a terminal
+
+# Load or setup Telegram configuration
+telegram_config = load_telegram_config()
+if not telegram_config and is_interactive:
+    setup_choice = input(color_text("Would you like to set up Telegram notifications? (y/n): ", '93')).lower()
+    if setup_choice == 'y':
+        telegram_config = setup_telegram_config()
+
 code_verifier, code_challenge = generate_code_verifier_and_challenge()
 
 if os.path.exists(TOKEN_FILE):
@@ -175,6 +283,10 @@ if os.path.exists(TOKEN_FILE):
         refresh_token = token_response['refresh_token']
         save_tokens_to_file(token_response)
 else:
+    if not is_interactive:
+        print(color_text("❌ No tokens found and running in non-interactive mode. Please run the script manually first to authenticate.", '91'))
+        exit(1)
+    
     token_response = exchange_code_for_tokens(get_auth_code())
     access_token = token_response['access_token']
     refresh_token = token_response['refresh_token']
@@ -202,12 +314,31 @@ if old_orders:
         for diff in differences:
             print(diff)
         save_orders_to_file(detailed_new_orders)
+        
+        # Send Telegram notification if configured
+        if telegram_config:
+            print(color_text("\n> Sending Telegram notification...", '94'))
+            telegram_message = format_telegram_message(differences, len(detailed_new_orders))
+            
+            # Run the async function
+            try:
+                success = asyncio.run(send_telegram_message(
+                    telegram_config['bot_token'], 
+                    telegram_config['chat_id'], 
+                    telegram_message
+                ))
+                if success:
+                    print(color_text("✅ Telegram notification sent successfully!", '92'))
+                else:
+                    print(color_text("❌ Failed to send Telegram notification", '91'))
+            except Exception as e:
+                print(color_text(f"❌ Error sending Telegram notification: {e}", '91'))
     else:
         print(color_text("No differences found.", '90'))
     
 else:
     # ask user if they want to save the new orders to a file for comparison next time
-    if input(color_text("Would you like to save the order information to a file for future comparison? (y/n): ", '93')).lower() == 'y':
+    if is_interactive and input(color_text("Would you like to save the order information to a file for future comparison? (y/n): ", '93')).lower() == 'y':
         save_orders_to_file(detailed_new_orders)
 
 for detailed_order in detailed_new_orders:
