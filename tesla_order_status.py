@@ -135,6 +135,12 @@ def load_telegram_config():
             
         if not config.get('bot_token') or not config.get('chat_id'):
             return None
+        
+        # Set default values for new options if not present
+        if 'enabled' not in config:
+            config['enabled'] = True
+        if 'always_notify' not in config:
+            config['always_notify'] = False
             
         return config
     except (json.JSONDecodeError, KeyError):
@@ -156,9 +162,16 @@ def setup_telegram_config():
         print(color_text("Invalid input. Skipping Telegram setup.", '91'))
         return None
     
+    # Ask for notification preferences
+    print(color_text("\n> Notification preferences:", '94'))
+    always_notify_input = input(color_text("Send notifications even when no changes are detected? (y/n): ", '93')).strip().lower()
+    always_notify = always_notify_input == 'y'
+    
     config = {
         'bot_token': bot_token,
-        'chat_id': chat_id
+        'chat_id': chat_id,
+        'enabled': True,
+        'always_notify': always_notify
     }
     
     try:
@@ -213,6 +226,75 @@ def format_telegram_message(differences, order_count):
         message += f"\n... and {len(differences) - 20} more changes"
     
     message += f"\n\n🔄 Check your Tesla account for complete details."
+    
+    return message
+
+
+def format_no_changes_message(order_count):
+    """Format message for when no changes are detected"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    message = f"🚗 <b>Tesla Order Status Check</b>\n"
+    message += f"📅 {timestamp}\n\n"
+    
+    if order_count == 1:
+        message += f"✅ No changes detected in your Tesla order\n"
+    else:
+        message += f"✅ No changes detected in your {order_count} Tesla orders\n"
+    
+    message += f"\n📊 Your order status remains the same since the last check."
+    
+    return message
+
+
+def format_order_details_for_telegram(detailed_orders):
+    """Format order details for Telegram message"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    message = f"🚗 <b>Tesla Order Status Report</b>\n"
+    message += f"📅 {timestamp}\n\n"
+    
+    for i, detailed_order in enumerate(detailed_orders):
+        order = detailed_order['order']
+        order_details = detailed_order['details']
+        scheduling = order_details.get('tasks', {}).get('scheduling', {})
+        order_info = order_details.get('tasks', {}).get('registration', {}).get('orderDetails', {})
+        final_payment_data = order_details.get('tasks', {}).get('finalPayment', {}).get('data', {})
+        
+        if i > 0:
+            message += "\n" + "─" * 30 + "\n\n"
+        
+        message += f"<b>📋 Order {i+1}</b>\n"
+        message += f"🔢 Order ID: <code>{order['referenceNumber']}</code>\n"
+        message += f"📊 Status: <b>{order['orderStatus']}</b>\n"
+        message += f"🚙 Model: <b>{order['modelCode']}</b>\n"
+        
+        if order.get('vin'):
+            message += f"🆔 VIN: <code>{order['vin']}</code>\n"
+        
+        # Delivery information
+        delivery_window = scheduling.get('deliveryWindowDisplay', 'N/A')
+        if delivery_window != 'N/A':
+            message += f"📅 Delivery Window: <b>{delivery_window}</b>\n"
+        
+        eta_delivery = final_payment_data.get('etaToDeliveryCenter', 'N/A')
+        if eta_delivery != 'N/A':
+            message += f"🚚 ETA to Delivery: <b>{eta_delivery}</b>\n"
+        
+        delivery_appt = scheduling.get('apptDateTimeAddressStr', 'N/A')
+        if delivery_appt != 'N/A':
+            message += f"📍 Delivery Appointment: <b>{delivery_appt}</b>\n"
+        
+        # Vehicle routing location
+        routing_location = order_info.get('vehicleRoutingLocation', 0)
+        if routing_location:
+            from tesla_stores import TeslaStore
+            store_name = TeslaStore(routing_location).label
+            message += f"🏪 Delivery Location: <b>{store_name}</b>\n"
+    
+    # Limit message length (Telegram has a 4096 character limit)
+    if len(message) > 4000:
+        message = message[:3950] + "\n\n... <i>(Output truncated due to length)</i>"
     
     return message
 
@@ -315,9 +397,9 @@ if old_orders:
             print(diff)
         save_orders_to_file(detailed_new_orders)
         
-        # Send Telegram notification if configured
-        if telegram_config:
-            print(color_text("\n> Sending Telegram notification...", '94'))
+        # Send Telegram notification if configured and enabled
+        if telegram_config and telegram_config.get('enabled', True):
+            print(color_text("\n> Sending Telegram notification for changes...", '94'))
             telegram_message = format_telegram_message(differences, len(detailed_new_orders))
             
             # Run the async function
@@ -333,8 +415,29 @@ if old_orders:
                     print(color_text("❌ Failed to send Telegram notification", '91'))
             except Exception as e:
                 print(color_text(f"❌ Error sending Telegram notification: {e}", '91'))
+        elif telegram_config and not telegram_config.get('enabled', True):
+            print(color_text("ℹ️ Telegram notifications are disabled", '90'))
     else:
         print(color_text("No differences found.", '90'))
+        
+        # Send notification based on always_notify setting
+        if telegram_config and telegram_config.get('enabled', True) and telegram_config.get('always_notify', False):
+            print(color_text("\n> Sending Telegram notification with order details...", '94'))
+            # When always_notify is true, send full order details instead of just "no changes"
+            telegram_message = format_order_details_for_telegram(detailed_new_orders)
+            
+            try:
+                success = asyncio.run(send_telegram_message(
+                    telegram_config['bot_token'], 
+                    telegram_config['chat_id'], 
+                    telegram_message
+                ))
+                if success:
+                    print(color_text("✅ Telegram notification with order details sent successfully!", '92'))
+                else:
+                    print(color_text("❌ Failed to send Telegram notification", '91'))
+            except Exception as e:
+                print(color_text(f"❌ Error sending Telegram notification: {e}", '91'))
     
 else:
     # ask user if they want to save the new orders to a file for comparison next time

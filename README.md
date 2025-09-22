@@ -35,17 +35,35 @@ To receive Telegram notifications when your Tesla order status changes:
    - Run the script for the first time
    - When prompted, choose to set up Telegram notifications
    - Enter your bot token and chat ID
+   - Choose notification preferences (always notify or only on changes)
    - Or manually create a `telegram_config.json` file:
    ```json
    {
        "bot_token": "YOUR_BOT_TOKEN_HERE",
-       "chat_id": "YOUR_CHAT_ID_HERE"
+       "chat_id": "YOUR_CHAT_ID_HERE",
+       "enabled": true,
+       "always_notify": false
    }
    ```
+
+### Configuration Options
+
+- **`enabled`** (boolean): Enable/disable Telegram notifications entirely
+  - `true`: Notifications are active
+  - `false`: No notifications will be sent
+
+- **`always_notify`** (boolean): Control when notifications are sent
+  - `true`: Send full order details every time the script runs (even when no changes)
+  - `false`: Only send notifications when changes are detected (default)
 
 4. **Test your configuration:**
    ```sh
    python3 test_telegram.py
+   ```
+
+5. **Manage your settings:**
+   ```sh
+   python3 config_telegram.py
    ```
 
 ## Usage
@@ -68,6 +86,17 @@ crontab -e
 ```
 
 For silent operation (only outputs when changes are found), you can redirect the output and only get notified via Telegram.
+
+### Telegram Notification Modes
+
+When `always_notify: true` is enabled, you'll receive detailed order information every time the script runs, including:
+- Order ID and current status
+- Vehicle model and VIN (if assigned)
+- Delivery window and estimated arrival
+- Delivery appointment details
+- Delivery center location
+
+This is perfect for regular status updates, even when nothing has changed, so you can stay informed about your order's current state.
 
 ## Preview
 
